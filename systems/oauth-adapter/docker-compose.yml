@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  oauth-adapter:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - ./.env
+    volumes:
+      - .:/app
+      - oauth_data:/data
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
+
+volumes:
+  oauth_data:
+
