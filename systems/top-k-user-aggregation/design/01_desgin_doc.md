@@ -96,6 +96,8 @@ Invariant:
 All event and aggregate data must have explicit retention limits.
 
 5. High-Level Architecture
+
+```
 User
   │
   ▼
@@ -124,6 +126,7 @@ OAuth Service ───► UserTokens (Control Plane DB)
                                    │
                                    ▼
                                 Cache
+```
 
 6. Data Flow (Conceptual)
 6.1 OAuth & Setup
@@ -209,12 +212,14 @@ Separates correctness from performance
 Matches real-world production systems
 
 11. Summary of Invariants
-Invariant	Description
-Event log is the backbone	All data flows through it
-Raw events are truth	Aggregates are derived
-Async aggregation	Never on read path
-Time-bounded storage	No infinite growth
-Decoupled components	Easier evolution
+
+| Invariant | Description |
+|-----------|-------------|
+| Event log is the backbone | All data flows through it |
+| Raw events are truth | Aggregates are derived |
+| Async aggregation | Never on read path |
+| Time-bounded storage | No infinite growth |
+| Decoupled components | Easier evolution |
 ✅ Outcome of This Document
 
 After this document, we are confident that:
