@@ -38,6 +38,7 @@ services:
       - "5432:5432"
     volumes:
       - /runtime/shared/system-design-lab/top_k_user_aggregation/postgres:/var/lib/postgresql/data
+      - ./schemas/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
 
   cassandra:
     image: cassandra:4.1
@@ -53,10 +54,26 @@ services:
 
   redis:
     image: redis:7-alpine
+    command: redis-server --appendonly yes
     ports:
       - "6379:6379"
     volumes:
       - /runtime/shared/system-design-lab/top_k_user_aggregation/redis:/data
+
+  # NEW: DB-backed scheduler for crawl jobs
+  crawl-scheduler:
+    build:
+      context: ./services/crawl-scheduler
+      dockerfile: Dockerfile
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      POSTGRES_URL: "postgres://topk:topk@postgres:5432/topk?sslmode=disable"
+      REDIS_ADDR: "redis:6379"
+      POLL_INTERVAL: "10s"
+      STUCK_THRESHOLD: "1h"
+    restart: unless-stopped
 
   crawl-worker:
     build:
@@ -65,9 +82,11 @@ services:
     depends_on:
       - redis
       - kafka
+      - postgres
     environment:
       REDIS_ADDR: "redis:6379"
       KAFKA_BROKER: "kafka:9092"
+      POSTGRES_URL: "postgres://topk:topk@postgres:5432/topk?sslmode=disable"
     restart: unless-stopped
 
   raw-event-processor:
@@ -113,7 +132,7 @@ services:
       CACHE_TTL: "1h"
     restart: unless-stopped
 
-  # One-off: enqueue a test crawl job
+  # One-off: enqueue a test crawl job (for manual testing only)
   enqueue-test:
     build:
       context: ./services/crawl-worker

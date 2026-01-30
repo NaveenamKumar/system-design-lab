@@ -17,13 +17,95 @@ A functional end-to-end system that:
 
 | Area | Lab Implementation | Why It's OK for Lab |
 |------|-------------------|---------------------|
-| Crawl jobs | In-memory (Asynq/Redis) | Acceptable for demo; jobs are cheap to recreate |
+| Crawl jobs | **DB-backed scheduler with reconciliation** | ✅ Production-ready pattern |
 | Deduplication | None | Over-counting is acceptable per design doc |
 | Partition affinity | Not enforced | Counter columns handle concurrent writes |
 | Cache invalidation | TTL-only (5 min) | 1-day staleness is acceptable |
 | OAuth tokens | No refresh rotation | GitHub tokens are long-lived for demo |
 | Error handling | Log and continue | No production alerting needed |
 | Metrics/Observability | None | Visual verification via logs |
+
+---
+
+## DB-Backed Scheduler Pattern (Implemented)
+
+### The Problem: Redis Job Persistence
+
+Originally, crawl jobs were scheduled using Asynq with `ProcessIn(24*time.Hour)`. The problem:
+- Jobs stored in Redis (in-memory)
+- Redis restart = all scheduled jobs lost
+- 70M daily crawl jobs × 500 bytes = 35GB RAM (expensive at scale)
+
+### The Solution: DB as Source of Truth
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│   PostgreSQL: user_crawl_schedule                               │
+│   ┌──────────┬──────────┬────────────────┬──────────────────┐  │
+│   │ user_id  │ provider │ next_crawl_at  │ status           │  │
+│   ├──────────┼──────────┼────────────────┼──────────────────┤  │
+│   │ user_1   │ spotify  │ tomorrow 2AM   │ IDLE             │  │
+│   │ user_2   │ spotify  │ now            │ ENQUEUED         │  │
+│   └──────────┴──────────┴────────────────┴──────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+         Scheduler polls every 10 seconds
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│   Redis/Asynq: Ready Queue (only "execute NOW" jobs)            │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│   Crawl Workers → Update DB: status=IDLE, next_crawl_at=tomorrow│
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Components
+
+**1. Scheduler (crawl-scheduler)**
+```sql
+-- Query 1: Find ready jobs
+SELECT * FROM user_crawl_schedule
+WHERE next_crawl_at <= NOW() AND status = 'IDLE'
+FOR UPDATE SKIP LOCKED;
+→ Set status = 'ENQUEUED', enqueue to Asynq
+
+-- Query 2: Reconciliation (find stuck jobs)
+SELECT * FROM user_crawl_schedule
+WHERE status = 'ENQUEUED' AND updated_at < NOW() - INTERVAL '1 hour';
+→ Re-enqueue (job was lost in Redis)
+```
+
+**2. Worker (crawl-worker)**
+```go
+// On job start
+updateStatus(userID, provider, "RUNNING")
+
+// On success
+UPDATE user_crawl_schedule
+SET status = 'IDLE', next_crawl_at = NOW() + '24 hours'
+WHERE user_id = ? AND provider = ?
+```
+
+### Why This Works
+
+| Scenario | What Happens |
+|----------|--------------|
+| Normal flow | IDLE → ENQUEUED → RUNNING → IDLE (next_crawl_at = tomorrow) |
+| Redis dies | DB has status='ENQUEUED', reconciliation re-enqueues |
+| Worker crashes | Same as above |
+| Scheduler restarts | Continues polling from DB |
+
+### Trade-offs
+
+| Aspect | DB-Backed | Redis-Only |
+|--------|-----------|------------|
+| Durability | ✅ Survives restart | ❌ Lost on restart |
+| Cost at scale | ✅ Disk storage | ❌ RAM (expensive) |
+| Latency | ~10s poll delay | Instant |
+| Complexity | Medium | Low |
+| Reconciliation | ✅ Built-in | ❌ Manual |
 
 ---
 
@@ -36,7 +118,7 @@ A functional end-to-end system that:
 | Kafka | Single broker, no replication | 3+ brokers, replication factor 3, ISR ≥ 2 |
 | Cassandra | Single node | 3+ nodes, RF=3, LOCAL_QUORUM reads/writes |
 | Redis | Single instance | Redis Cluster or Sentinel for HA |
-| Job persistence | Redis (volatile) | Durable queue or DB-backed scheduler |
+| Job persistence | **DB-backed scheduler** ✅ | Same pattern scales to production |
 
 ### 2. **Scalability**
 
@@ -137,7 +219,8 @@ Production options:
 - **Async aggregation is key** — never aggregate on read path
 
 ### Technology Choices
-- **Asynq > Kafka for job scheduling** — simpler, built-in delays/retries
+- **DB + Asynq for job scheduling** — DB for durability, Asynq for execution
+- **Reconciliation pattern** — recovers from Redis failures automatically
 - **Kafka for event log** — durable, replayable, multiple consumers
 - **Cassandra counters have quirks** — no secondary indexes, no TTL on counters directly
 
@@ -166,6 +249,7 @@ When discussing this system in interviews:
    - Cassandra: high write throughput, time-series friendly, TTL built-in
 
 3. **How do you handle failures?**
+   - DB-backed scheduler with reconciliation for lost jobs
    - Kafka consumer offsets for replay
    - Cassandra counters for idempotent-ish increments
    - Cache fallback to DB

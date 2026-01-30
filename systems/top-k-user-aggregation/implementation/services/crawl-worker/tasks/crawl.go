@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,10 +10,36 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	_ "github.com/lib/pq"
 	"github.com/segmentio/kafka-go"
 )
 
 const TypeCrawlUser = "crawl:user"
+
+// DB connection (initialized once)
+var db *sql.DB
+
+func init() {
+	postgresURL := getEnv("POSTGRES_URL", "")
+	if postgresURL == "" {
+		log.Println("POSTGRES_URL not set, DB updates disabled")
+		return
+	}
+
+	var err error
+	db, err = sql.Open("postgres", postgresURL)
+	if err != nil {
+		log.Printf("Warning: failed to connect to postgres: %v", err)
+		return
+	}
+
+	if err := db.Ping(); err != nil {
+		log.Printf("Warning: failed to ping postgres: %v", err)
+		db = nil
+		return
+	}
+	log.Println("Connected to PostgreSQL for status updates")
+}
 
 // CrawlUserPayload is the job payload
 type CrawlUserPayload struct {
@@ -52,18 +79,22 @@ func HandleCrawlUserTask(ctx context.Context, t *asynq.Task) error {
 
 	log.Printf("Crawling user=%s provider=%s since=%d", p.UserID, p.Provider, p.Since)
 
-	// 1. Fetch listen history from provider (simulated for now)
+	// 1. Update status to RUNNING (if DB available)
+	updateStatus(p.UserID, p.Provider, "RUNNING", "")
+
+	// 2. Fetch listen history from provider (simulated for now)
 	events := fetchListenHistory(p.UserID, p.Provider, p.Since)
 
-	// 2. Publish events to Kafka
+	// 3. Publish events to Kafka
 	if err := publishEvents(ctx, events); err != nil {
+		// Mark as IDLE so scheduler can retry
+		updateStatusWithError(p.UserID, p.Provider, "IDLE", fmt.Sprintf("publish error: %v", err))
 		return fmt.Errorf("publish events: %w", err)
 	}
 
-	// 3. Reschedule for tomorrow
-	if err := reschedule(p.UserID, p.Provider); err != nil {
-		log.Printf("Warning: failed to reschedule: %v", err)
-	}
+	// 4. Update DB: status=IDLE, next_crawl_at=tomorrow
+	//    Scheduler will pick it up tomorrow
+	markCrawlComplete(p.UserID, p.Provider)
 
 	log.Printf("Crawl complete: user=%s events=%d", p.UserID, len(events))
 	return nil
@@ -114,23 +145,61 @@ func publishEvents(ctx context.Context, events []ListenEvent) error {
 	return w.WriteMessages(ctx, msgs...)
 }
 
-// reschedule enqueues the next crawl for tomorrow
-func reschedule(userID, provider string) error {
-	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
-	client := asynq.NewClient(asynq.RedisClientOpt{Addr: redisAddr})
-	defer client.Close()
+// updateStatus updates the job status in PostgreSQL
+func updateStatus(userID, provider, status, lastError string) {
+	if db == nil {
+		return
+	}
 
-	task, err := NewCrawlUserTask(userID, provider, time.Now())
+	_, err := db.Exec(`
+		UPDATE user_crawl_schedule 
+		SET status = $1, last_error = $2
+		WHERE user_id = $3 AND provider = $4
+	`, status, sql.NullString{String: lastError, Valid: lastError != ""}, userID, provider)
+
 	if err != nil {
-		return err
+		log.Printf("Warning: failed to update status: %v", err)
+	}
+}
+
+// updateStatusWithError updates status and records error
+func updateStatusWithError(userID, provider, status, lastError string) {
+	if db == nil {
+		return
+	}
+
+	_, err := db.Exec(`
+		UPDATE user_crawl_schedule 
+		SET status = $1, last_error = $2
+		WHERE user_id = $3 AND provider = $4
+	`, status, lastError, userID, provider)
+
+	if err != nil {
+		log.Printf("Warning: failed to update status with error: %v", err)
+	}
+}
+
+// markCrawlComplete sets status=IDLE and schedules next crawl for tomorrow
+func markCrawlComplete(userID, provider string) {
+	if db == nil {
+		return
 	}
 
 	tomorrow := time.Now().Add(24 * time.Hour)
-	_, err = client.Enqueue(task,
-		asynq.ProcessAt(tomorrow),
-		asynq.Queue("crawl"),
-	)
-	return err
+
+	_, err := db.Exec(`
+		UPDATE user_crawl_schedule 
+		SET status = 'IDLE', 
+		    next_crawl_at = $1,
+		    last_error = NULL
+		WHERE user_id = $2 AND provider = $3
+	`, tomorrow, userID, provider)
+
+	if err != nil {
+		log.Printf("Warning: failed to mark crawl complete: %v", err)
+	} else {
+		log.Printf("Scheduled next crawl for user=%s provider=%s at %v", userID, provider, tomorrow)
+	}
 }
 
 func getEnv(key, fallback string) string {
