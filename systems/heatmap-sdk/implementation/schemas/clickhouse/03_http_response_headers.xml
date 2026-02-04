@@ -1,0 +1,9 @@
+<clickhouse>
+  <!-- Add headers to ALL HTTP responses (not just default response). -->
+  <http_response_headers>
+    <Access-Control-Allow-Origin>*</Access-Control-Allow-Origin>
+    <Access-Control-Allow-Methods>GET, POST, OPTIONS</Access-Control-Allow-Methods>
+    <Access-Control-Allow-Headers>origin, x-requested-with, content-type, accept, authorization, x-clickhouse-user, x-clickhouse-key, x-clickhouse-format</Access-Control-Allow-Headers>
+  </http_response_headers>
+</clickhouse>
+

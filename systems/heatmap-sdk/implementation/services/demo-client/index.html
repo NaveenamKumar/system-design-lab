@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Heatmap Demo Client</title>
+    <style>
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Liberation Sans",
+          sans-serif;
+        margin: 20px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+      label {
+        font-size: 14px;
+      }
+      input {
+        padding: 6px 8px;
+      }
+      button {
+        padding: 8px 10px;
+        cursor: pointer;
+      }
+      #screen {
+        width: 900px;
+        height: 500px;
+        border: 2px solid #111;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #f7f7f7, #eaeaea);
+        position: relative;
+        overflow: hidden;
+        user-select: none;
+      }
+      #screen::after {
+        content: "Move your mouse here";
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        color: #444;
+        font-size: 14px;
+      }
+      #status {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+        white-space: pre;
+        border: 1px solid #ddd;
+        padding: 10px;
+        border-radius: 8px;
+        max-width: 900px;
+        margin-top: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Heatmap Demo Client (mousemove → ingestion)</h2>
+
+    <div class="row">
+      <label>
+        Client ID:
+        <input id="clientId" value="acme" />
+      </label>
+      <label>
+        Screen ID:
+        <input id="screenId" value="home_v1" />
+      </label>
+      <label>
+        Ingestion URL:
+        <input id="ingestionUrl" size="40" value="http://localhost:8088/events/batch" />
+      </label>
+      <label>
+        Max events/sec:
+        <input id="eps" type="number" min="1" max="240" value="60" />
+      </label>
+      <label>
+        Flush ms:
+        <input id="flushMs" type="number" min="50" max="5000" value="1000" />
+      </label>
+      <button id="toggle">Start</button>
+    </div>
+
+    <div id="screen"></div>
+    <div id="status"></div>
+
+    <script>
+      const screenEl = document.getElementById("screen");
+      const statusEl = document.getElementById("status");
+
+      const clientIdEl = document.getElementById("clientId");
+      const screenIdEl = document.getElementById("screenId");
+      const ingestionUrlEl = document.getElementById("ingestionUrl");
+      const epsEl = document.getElementById("eps");
+      const flushMsEl = document.getElementById("flushMs");
+      const toggleEl = document.getElementById("toggle");
+
+      let running = false;
+      let buffer = [];
+      let lastSentAt = 0;
+      let accepted = 0;
+      let failed = 0;
+      let dropped = 0;
+      let lastMouseAt = 0;
+
+      function clamp01(x) {
+        if (x < 0) return 0;
+        if (x > 1) return 1;
+        return x;
+      }
+
+      function nowIso() {
+        return new Date().toISOString();
+      }
+
+      function makeBatchId() {
+        if (crypto && crypto.randomUUID) return crypto.randomUUID();
+        return String(Date.now()) + "-" + Math.random().toString(16).slice(2);
+      }
+
+      async function flush() {
+        if (!running) return;
+        if (buffer.length === 0) return;
+
+        const payload = {
+          client_id: clientIdEl.value.trim(),
+          screen_id: screenIdEl.value.trim(),
+          batch_id: makeBatchId(),
+          events: buffer.splice(0, buffer.length),
+        };
+
+        const url = ingestionUrlEl.value.trim();
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) {
+            failed += payload.events.length;
+          } else {
+            const body = await res.json().catch(() => ({}));
+            accepted += body.accepted || payload.events.length;
+          }
+        } catch (e) {
+          failed += payload.events.length;
+        } finally {
+          lastSentAt = Date.now();
+          renderStatus();
+        }
+      }
+
+      function renderStatus() {
+        statusEl.textContent =
+          `running: ${running}\n` +
+          `buffered: ${buffer.length}\n` +
+          `accepted: ${accepted}\n` +
+          `failed:   ${failed}\n` +
+          `dropped:  ${dropped}\n` +
+          `last_mouse_at_ms_ago: ${Date.now() - lastMouseAt}\n` +
+          `last_sent_at_ms_ago:  ${Date.now() - lastSentAt}\n`;
+      }
+
+      let flushTimer = null;
+      function start() {
+        running = true;
+        accepted = 0;
+        failed = 0;
+        dropped = 0;
+        buffer = [];
+        lastSentAt = 0;
+        lastMouseAt = 0;
+
+        const flushMs = Number(flushMsEl.value) || 1000;
+        flushTimer = setInterval(flush, flushMs);
+        toggleEl.textContent = "Stop";
+        renderStatus();
+      }
+
+      function stop() {
+        running = false;
+        if (flushTimer) clearInterval(flushTimer);
+        flushTimer = null;
+        toggleEl.textContent = "Start";
+        renderStatus();
+      }
+
+      toggleEl.addEventListener("click", () => {
+        if (running) stop();
+        else start();
+      });
+
+      // Throttle to max events/sec
+      screenEl.addEventListener("mousemove", (ev) => {
+        if (!running) return;
+        lastMouseAt = Date.now();
+
+        const eps = Math.max(1, Math.min(240, Number(epsEl.value) || 60));
+        const minDelta = 1000 / eps;
+        const now = performance.now();
+        if (screenEl._lastEventAt && now - screenEl._lastEventAt < minDelta) {
+          dropped++;
+          return;
+        }
+        screenEl._lastEventAt = now;
+
+        const rect = screenEl.getBoundingClientRect();
+        const xPx = ev.clientX - rect.left;
+        const yPx = ev.clientY - rect.top;
+
+        const xNorm = clamp01(xPx / rect.width);
+        const yNorm = clamp01(yPx / rect.height);
+
+        buffer.push({
+          event_time: nowIso(),
+          x_norm: xNorm,
+          y_norm: yNorm,
+          event_type: "mousemove",
+        });
+
+        // Safety bound on memory
+        if (buffer.length > 20000) {
+          buffer.splice(0, buffer.length - 20000);
+          dropped += 1000;
+        }
+
+        renderStatus();
+      });
+
+      // initial
+      renderStatus();
+    </script>
+  </body>
+</html>
+

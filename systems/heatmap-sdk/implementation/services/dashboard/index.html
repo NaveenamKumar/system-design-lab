@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Heatmap Dashboard</title>
+    <style>
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Liberation Sans",
+          sans-serif;
+        margin: 20px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+      label {
+        font-size: 14px;
+      }
+      input,
+      select {
+        padding: 6px 8px;
+      }
+      button {
+        padding: 8px 10px;
+        cursor: pointer;
+      }
+      #canvasWrap {
+        width: 900px;
+        height: 500px;
+        border: 2px solid #111;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #fafafa, #ececec);
+        position: relative;
+        overflow: hidden;
+        user-select: none;
+      }
+      #status {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+        white-space: pre;
+        border: 1px solid #ddd;
+        padding: 10px;
+        border-radius: 8px;
+        max-width: 900px;
+        margin-top: 12px;
+      }
+    </style>
+    <script src="https://unpkg.com/heatmap.js@2.0.5/build/heatmap.min.js"></script>
+  </head>
+  <body>
+    <h2>Heatmap Dashboard (ClickHouse aggregates)</h2>
+
+    <div class="row">
+      <label>
+        Query API:
+        <input id="apiBase" size="35" value="http://localhost:8091" />
+      </label>
+      <label>
+        Client:
+        <input id="clientId" value="acme" />
+      </label>
+      <label>
+        Screen:
+        <input id="screenId" value="home_v1" />
+      </label>
+      <label>
+        dt (YYYY-MM-DD):
+        <input id="dt" value="2026-02-03" />
+      </label>
+      <label>
+        hour (00-23):
+        <input id="hour" value="15" size="3" />
+      </label>
+      <button id="loadBtn">Load</button>
+      <button id="clearBtn">Clear</button>
+    </div>
+
+    <div id="canvasWrap"></div>
+    <div id="status"></div>
+
+    <script>
+      const wrap = document.getElementById("canvasWrap");
+      const statusEl = document.getElementById("status");
+
+      const apiBaseEl = document.getElementById("apiBase");
+      const clientIdEl = document.getElementById("clientId");
+      const screenIdEl = document.getElementById("screenId");
+      const dtEl = document.getElementById("dt");
+      const hourEl = document.getElementById("hour");
+      const loadBtn = document.getElementById("loadBtn");
+      const clearBtn = document.getElementById("clearBtn");
+
+      const heatmap = h337.create({
+        container: wrap,
+        radius: 20,
+        maxOpacity: 0.65,
+        minOpacity: 0.0,
+        blur: 0.9,
+      });
+
+      function renderStatus(s) {
+        statusEl.textContent = s;
+      }
+
+      function clampInt(x, lo, hi) {
+        x = Number(x);
+        if (Number.isNaN(x)) return lo;
+        if (x < lo) return lo;
+        if (x > hi) return hi;
+        return x;
+      }
+
+      async function load() {
+        const apiBase = apiBaseEl.value.trim().replace(/\/$/, "");
+        const clientId = clientIdEl.value.trim();
+        const screenId = screenIdEl.value.trim();
+        const dt = dtEl.value.trim();
+        const hour = String(clampInt(hourEl.value.trim(), 0, 23)).padStart(2, "0");
+
+        const url =
+          `${apiBase}/heatmap/hourly?` +
+          new URLSearchParams({ client_id: clientId, screen_id: screenId, dt, hour }).toString();
+
+        renderStatus(`GET ${url}\nloading...`);
+
+        const res = await fetch(url);
+        if (!res.ok) {
+          const txt = await res.text();
+          renderStatus(`error ${res.status}\n${txt}`);
+          return;
+        }
+
+        const data = await res.json();
+        const gridW = data.grid_w;
+        const gridH = data.grid_h;
+        const cells = data.cells || [];
+
+        const rect = wrap.getBoundingClientRect();
+        const w = rect.width;
+        const h = rect.height;
+
+        let max = 1;
+        const points = cells.map((c) => {
+          const value = Number(c.count) || 0;
+          if (value > max) max = value;
+          const x = Math.floor(((Number(c.cell_x) + 0.5) / gridW) * w);
+          const y = Math.floor(((Number(c.cell_y) + 0.5) / gridH) * h);
+          return { x, y, value };
+        });
+
+        heatmap.setData({ max, data: points });
+
+        renderStatus(
+          `bucket_start: ${data.bucket_start}\n` +
+            `cells: ${cells.length}\n` +
+            `max_count: ${max}\n`
+        );
+      }
+
+      loadBtn.addEventListener("click", load);
+      clearBtn.addEventListener("click", () => {
+        heatmap.setData({ max: 1, data: [] });
+        renderStatus("cleared");
+      });
+
+      renderStatus("ready");
+    </script>
+  </body>
+</html>
+
