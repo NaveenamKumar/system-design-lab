@@ -1,7 +1,7 @@
--- Heatmap aggregates (Phase 1)
+-- Heatmap aggregates
 -- Notes:
 -- - Separate tables for hourly/daily/weekly to allow different TTLs and clear rollup boundaries.
--- - For the lab, keep TTLs commented out initially (optional).
+-- - TTLs: hourly 90 days, daily 2 years (730d), weekly 5 years (1825d).
 
 CREATE DATABASE IF NOT EXISTS heatmap;
 
@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS heatmap.heatmap_hourly
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(bucket_start)
-ORDER BY (client_id, screen_id, bucket_start, cell_x, cell_y);
+ORDER BY (client_id, screen_id, bucket_start, cell_x, cell_y)
+TTL bucket_start + INTERVAL 90 DAY;
 
 CREATE TABLE IF NOT EXISTS heatmap.heatmap_daily
 (
@@ -29,7 +30,8 @@ CREATE TABLE IF NOT EXISTS heatmap.heatmap_daily
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(bucket_start)
-ORDER BY (client_id, screen_id, bucket_start, cell_x, cell_y);
+ORDER BY (client_id, screen_id, bucket_start, cell_x, cell_y)
+TTL bucket_start + INTERVAL 730 DAY;
 
 CREATE TABLE IF NOT EXISTS heatmap.heatmap_weekly
 (
@@ -42,5 +44,6 @@ CREATE TABLE IF NOT EXISTS heatmap.heatmap_weekly
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(bucket_start)
-ORDER BY (client_id, screen_id, bucket_start, cell_x, cell_y);
+ORDER BY (client_id, screen_id, bucket_start, cell_x, cell_y)
+TTL bucket_start + INTERVAL 1825 DAY;
 

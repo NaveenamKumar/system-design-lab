@@ -1,4 +1,7 @@
 import argparse
+import time
+import urllib.request
+import urllib.parse
 from datetime import datetime, timezone
 
 from pyspark.sql import SparkSession, functions as F, types as T
@@ -6,6 +9,31 @@ from pyspark.sql import SparkSession, functions as F, types as T
 
 GRID_W = 100
 GRID_H = 200
+
+
+def _ch_execute(url, user, password, sql):
+    """Execute a SQL statement against ClickHouse HTTP API."""
+    data = sql.encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("X-ClickHouse-User", user)
+    req.add_header("X-ClickHouse-Key", password)
+    with urllib.request.urlopen(req) as resp:
+        return resp.read().decode("utf-8").strip()
+
+
+def delete_bucket_sync(url, user, password, table, where, timeout=60):
+    """Delete rows matching `where` and wait for the mutation to complete."""
+    _ch_execute(url, user, password, f"ALTER TABLE {table} DELETE WHERE {where}")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        result = _ch_execute(
+            url, user, password,
+            f"SELECT count() FROM system.mutations WHERE database='heatmap' AND table='{table.split('.')[-1]}' AND is_done=0",
+        )
+        if result == "0":
+            return
+        time.sleep(1)
+    raise TimeoutError(f"Mutation on {table} not done within {timeout}s")
 
 
 def clamp_col(col, lo, hi):
@@ -21,9 +49,11 @@ def main():
     parser.add_argument("--dt", required=True, help="UTC date YYYY-MM-DD")
     parser.add_argument("--hour", required=True, help="UTC hour HH (00-23)")
     parser.add_argument("--clickhouse-url", default="jdbc:clickhouse://clickhouse:8123/heatmap")
+    parser.add_argument("--clickhouse-http", default="http://clickhouse:8123")
     parser.add_argument("--clickhouse-user", default="heatmap")
     parser.add_argument("--clickhouse-password", default="heatmap")
     parser.add_argument("--target-table", default="heatmap_hourly")
+    parser.add_argument("--format", default="json", choices=["json", "parquet"], help="Raw file format in S3 (json or parquet)")
     args = parser.parse_args()
 
     # Validate bucket start
@@ -54,12 +84,18 @@ def main():
         ]
     )
 
-    base = f"s3a://{args.s3_bucket}/{args.topics_dir.strip('/')}/{args.topic}"
+    topics_dir = args.topics_dir.strip('/')
+    if args.format == "parquet" and topics_dir == "topics":
+        topics_dir = "topics-parquet"
+    base = f"s3a://{args.s3_bucket}/{topics_dir}/{args.topic}"
 
     # Kafka Connect TimeBasedPartitioner writes keys under dt=.../hour=...
     input_path = f"{base}/dt={args.dt}/hour={args.hour}"
 
-    df = spark.read.schema(schema).json(input_path)
+    if args.format == "parquet":
+        df = spark.read.parquet(input_path)
+    else:
+        df = spark.read.schema(schema).json(input_path)
 
     # Future: if we include client_id/screen_id at record-level, use them directly.
     # For now, Spark job will attach placeholders (lab), and we'll fix this after we verify Connect pathing.
@@ -83,6 +119,14 @@ def main():
             F.col("cell_y").cast("int"),
             F.col("count").cast("long"),
         )
+    )
+
+    # Delete existing rows for this bucket (idempotency: delete-then-insert)
+    bucket_str = bucket_start.strftime("%Y-%m-%d %H:%M:%S")
+    delete_bucket_sync(
+        args.clickhouse_http, args.clickhouse_user, args.clickhouse_password,
+        f"heatmap.{args.target_table}",
+        f"bucket_start = toDateTime('{bucket_str}')",
     )
 
     (

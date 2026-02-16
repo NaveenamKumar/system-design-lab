@@ -11,7 +11,8 @@
   "aws.secret.access.key": "minio123",
   "s3.part.size": "5242880",
 
-  "format.class": "io.confluent.connect.s3.format.json.JsonFormat",
+  "format.class": "io.confluent.connect.s3.format.parquet.ParquetFormat",
+  "parquet.codec": "snappy",
   "storage.class": "io.confluent.connect.s3.storage.S3Storage",
 
   "flush.size": "5000",
@@ -29,6 +30,7 @@
   "locale": "en",
   "timezone": "UTC",
   "timestamp.extractor": "RecordField",
-  "timestamp.field": "event_time"
-}
+  "timestamp.field": "event_time",
 
+  "topics.dir": "topics-parquet"
+}
