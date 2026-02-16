@@ -2,5 +2,7 @@ module ingestion-service
 
 go 1.22
 
-require github.com/segmentio/kafka-go v0.4.48
-
+require (
+	github.com/redis/go-redis/v9 v9.7.0
+	github.com/segmentio/kafka-go v0.4.48
+)

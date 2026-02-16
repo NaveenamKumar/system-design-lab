@@ -128,6 +128,140 @@ FORMAT JSON
 		writeJSON(w, http.StatusOK, out)
 	})
 
+	mux.HandleFunc("GET /heatmap/daily", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		clientID := strings.TrimSpace(q.Get("client_id"))
+		screenID := strings.TrimSpace(q.Get("screen_id"))
+		dt := strings.TrimSpace(q.Get("dt")) // YYYY-MM-DD
+
+		if !safeID.MatchString(clientID) {
+			httpError(w, http.StatusBadRequest, "invalid_client_id")
+			return
+		}
+		if !safeID.MatchString(screenID) {
+			httpError(w, http.StatusBadRequest, "invalid_screen_id")
+			return
+		}
+		if _, err := time.Parse("2006-01-02", dt); err != nil {
+			httpError(w, http.StatusBadRequest, "invalid_dt")
+			return
+		}
+
+		bucketStart := fmt.Sprintf("%s 00:00:00", dt)
+
+		sql := fmt.Sprintf(`
+SELECT cell_x, cell_y, sum(count) AS count
+FROM heatmap.heatmap_daily
+WHERE client_id = '%s'
+  AND screen_id = '%s'
+  AND bucket_start = toDateTime('%s')
+GROUP BY cell_x, cell_y
+FORMAT JSON
+`, escapeSQL(clientID), escapeSQL(screenID), escapeSQL(bucketStart))
+
+		body, err := clickhouseQuery(chURL, chUser, chPass, sql)
+		if err != nil {
+			log.Printf("clickhouse query failed: %v", err)
+			httpError(w, http.StatusBadGateway, "clickhouse_query_failed")
+			return
+		}
+
+		var parsed clickhouseJSON
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			log.Printf("clickhouse json parse failed: %v", err)
+			httpError(w, http.StatusBadGateway, "clickhouse_bad_json")
+			return
+		}
+
+		out := hourlyResponse{
+			GridW:       gridW,
+			GridH:       gridH,
+			ClientID:    clientID,
+			ScreenID:    screenID,
+			BucketStart: bucketStart,
+			Cells:       make([]cell, 0, len(parsed.Data)),
+		}
+
+		for _, row := range parsed.Data {
+			cx, ok1 := asInt32(row["cell_x"])
+			cy, ok2 := asInt32(row["cell_y"])
+			cnt, ok3 := asInt64(row["count"])
+			if !ok1 || !ok2 || !ok3 {
+				continue
+			}
+			out.Cells = append(out.Cells, cell{CellX: cx, CellY: cy, Count: cnt})
+		}
+
+		writeJSON(w, http.StatusOK, out)
+	})
+
+	mux.HandleFunc("GET /heatmap/weekly", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		clientID := strings.TrimSpace(q.Get("client_id"))
+		screenID := strings.TrimSpace(q.Get("screen_id"))
+		weekStart := strings.TrimSpace(q.Get("week_start")) // YYYY-MM-DD (Monday)
+
+		if !safeID.MatchString(clientID) {
+			httpError(w, http.StatusBadRequest, "invalid_client_id")
+			return
+		}
+		if !safeID.MatchString(screenID) {
+			httpError(w, http.StatusBadRequest, "invalid_screen_id")
+			return
+		}
+		if _, err := time.Parse("2006-01-02", weekStart); err != nil {
+			httpError(w, http.StatusBadRequest, "invalid_week_start")
+			return
+		}
+
+		bucketStart := fmt.Sprintf("%s 00:00:00", weekStart)
+
+		sql := fmt.Sprintf(`
+SELECT cell_x, cell_y, sum(count) AS count
+FROM heatmap.heatmap_weekly
+WHERE client_id = '%s'
+  AND screen_id = '%s'
+  AND bucket_start = toDateTime('%s')
+GROUP BY cell_x, cell_y
+FORMAT JSON
+`, escapeSQL(clientID), escapeSQL(screenID), escapeSQL(bucketStart))
+
+		body, err := clickhouseQuery(chURL, chUser, chPass, sql)
+		if err != nil {
+			log.Printf("clickhouse query failed: %v", err)
+			httpError(w, http.StatusBadGateway, "clickhouse_query_failed")
+			return
+		}
+
+		var parsed clickhouseJSON
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			log.Printf("clickhouse json parse failed: %v", err)
+			httpError(w, http.StatusBadGateway, "clickhouse_bad_json")
+			return
+		}
+
+		out := hourlyResponse{
+			GridW:       gridW,
+			GridH:       gridH,
+			ClientID:    clientID,
+			ScreenID:    screenID,
+			BucketStart: bucketStart,
+			Cells:       make([]cell, 0, len(parsed.Data)),
+		}
+
+		for _, row := range parsed.Data {
+			cx, ok1 := asInt32(row["cell_x"])
+			cy, ok2 := asInt32(row["cell_y"])
+			cnt, ok3 := asInt64(row["count"])
+			if !ok1 || !ok2 || !ok3 {
+				continue
+			}
+			out.Cells = append(out.Cells, cell{CellX: cx, CellY: cy, Count: cnt})
+		}
+
+		writeJSON(w, http.StatusOK, out)
+	})
+
 	mux.HandleFunc("GET /buckets/hourly", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		clientID := strings.TrimSpace(q.Get("client_id"))
@@ -148,6 +282,82 @@ FORMAT JSON
 		sql := fmt.Sprintf(`
 SELECT bucket_start, sum(count) AS events
 FROM heatmap.heatmap_hourly
+WHERE client_id = '%s'
+  AND screen_id = '%s'
+GROUP BY bucket_start
+ORDER BY bucket_start DESC
+LIMIT %d
+FORMAT JSON
+`, escapeSQL(clientID), escapeSQL(screenID), limit)
+
+		body, err := clickhouseQuery(chURL, chUser, chPass, sql)
+		if err != nil {
+			log.Printf("clickhouse query failed: %v", err)
+			httpError(w, http.StatusBadGateway, "clickhouse_query_failed")
+			return
+		}
+
+		writeRawJSON(w, http.StatusOK, body)
+	})
+
+	mux.HandleFunc("GET /buckets/daily", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		clientID := strings.TrimSpace(q.Get("client_id"))
+		screenID := strings.TrimSpace(q.Get("screen_id"))
+		limitStr := strings.TrimSpace(q.Get("limit"))
+		limit := 30
+		if limitStr != "" {
+			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 && v <= 500 {
+				limit = v
+			}
+		}
+
+		if !safeID.MatchString(clientID) || !safeID.MatchString(screenID) {
+			httpError(w, http.StatusBadRequest, "invalid_ids")
+			return
+		}
+
+		sql := fmt.Sprintf(`
+SELECT bucket_start, sum(count) AS events
+FROM heatmap.heatmap_daily
+WHERE client_id = '%s'
+  AND screen_id = '%s'
+GROUP BY bucket_start
+ORDER BY bucket_start DESC
+LIMIT %d
+FORMAT JSON
+`, escapeSQL(clientID), escapeSQL(screenID), limit)
+
+		body, err := clickhouseQuery(chURL, chUser, chPass, sql)
+		if err != nil {
+			log.Printf("clickhouse query failed: %v", err)
+			httpError(w, http.StatusBadGateway, "clickhouse_query_failed")
+			return
+		}
+
+		writeRawJSON(w, http.StatusOK, body)
+	})
+
+	mux.HandleFunc("GET /buckets/weekly", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		clientID := strings.TrimSpace(q.Get("client_id"))
+		screenID := strings.TrimSpace(q.Get("screen_id"))
+		limitStr := strings.TrimSpace(q.Get("limit"))
+		limit := 12
+		if limitStr != "" {
+			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 && v <= 500 {
+				limit = v
+			}
+		}
+
+		if !safeID.MatchString(clientID) || !safeID.MatchString(screenID) {
+			httpError(w, http.StatusBadRequest, "invalid_ids")
+			return
+		}
+
+		sql := fmt.Sprintf(`
+SELECT bucket_start, sum(count) AS events
+FROM heatmap.heatmap_weekly
 WHERE client_id = '%s'
   AND screen_id = '%s'
 GROUP BY bucket_start

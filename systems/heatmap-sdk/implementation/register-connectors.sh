@@ -9,5 +9,12 @@ curl -sS -X PUT \
   --data-binary @schemas/kafka-connect/s3-sink-json.json \
   "$CONNECT_URL/connectors/heatmap-s3-sink-json/config"
 
-echo "Done."
+echo ""
+echo "Registering S3 sink connector (Parquet) at $CONNECT_URL ..."
+curl -sS -X PUT \
+  -H 'Content-Type: application/json' \
+  --data-binary @schemas/kafka-connect/s3-sink-parquet.json \
+  "$CONNECT_URL/connectors/heatmap-s3-sink-parquet/config"
 
+echo ""
+echo "Done."

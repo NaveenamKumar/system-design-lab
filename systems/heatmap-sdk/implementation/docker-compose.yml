@@ -54,6 +54,13 @@ services:
       "
     restart: "no"
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./.runtime/redis:/data
+
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     environment:
@@ -113,7 +120,7 @@ services:
       dockerfile: Dockerfile
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
     ports:
-      - "8080:8080"
+      - "8085:8080"
       - "7077:7077"
 
   spark-worker:
@@ -154,12 +161,15 @@ services:
       dockerfile: Dockerfile
     depends_on:
       - kafka
+      - redis
     ports:
       - "8088:8088"
     environment:
       KAFKA_BROKER: "kafka:9092"
       KAFKA_TOPIC: "heatmap.events.raw"
       PORT: "8088"
+      REDIS_ADDR: "redis:6379"
+      DEDUP_TTL: "24h"
     restart: unless-stopped
 
   demo-client:

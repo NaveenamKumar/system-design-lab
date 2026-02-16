@@ -68,10 +68,18 @@
         <input id="screenId" value="home_v1" />
       </label>
       <label>
+        Granularity:
+        <select id="granularity">
+          <option value="hourly" selected>Hourly</option>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+        </select>
+      </label>
+      <label id="dtLabel">
         dt (YYYY-MM-DD):
         <input id="dt" value="2026-02-03" />
       </label>
-      <label>
+      <label id="hourLabel">
         hour (00-23):
         <input id="hour" value="15" size="3" />
       </label>
@@ -89,10 +97,33 @@
       const apiBaseEl = document.getElementById("apiBase");
       const clientIdEl = document.getElementById("clientId");
       const screenIdEl = document.getElementById("screenId");
+      const granularityEl = document.getElementById("granularity");
       const dtEl = document.getElementById("dt");
       const hourEl = document.getElementById("hour");
+      const dtLabel = document.getElementById("dtLabel");
+      const hourLabel = document.getElementById("hourLabel");
       const loadBtn = document.getElementById("loadBtn");
       const clearBtn = document.getElementById("clearBtn");
+
+      function updateInputVisibility() {
+        const g = granularityEl.value;
+        if (g === "hourly") {
+          dtLabel.style.display = "";
+          hourLabel.style.display = "";
+          dtLabel.querySelector("input").previousSibling.textContent = "\n        dt (YYYY-MM-DD):\n        ";
+        } else if (g === "daily") {
+          dtLabel.style.display = "";
+          hourLabel.style.display = "none";
+          dtLabel.querySelector("input").previousSibling.textContent = "\n        dt (YYYY-MM-DD):\n        ";
+        } else {
+          dtLabel.style.display = "";
+          hourLabel.style.display = "none";
+          dtLabel.querySelector("input").previousSibling.textContent = "\n        week_start (Monday, YYYY-MM-DD):\n        ";
+        }
+      }
+
+      granularityEl.addEventListener("change", updateInputVisibility);
+      updateInputVisibility();
 
       const heatmap = h337.create({
         container: wrap,
@@ -119,11 +150,23 @@
         const clientId = clientIdEl.value.trim();
         const screenId = screenIdEl.value.trim();
         const dt = dtEl.value.trim();
-        const hour = String(clampInt(hourEl.value.trim(), 0, 23)).padStart(2, "0");
+        const granularity = granularityEl.value;
 
-        const url =
-          `${apiBase}/heatmap/hourly?` +
-          new URLSearchParams({ client_id: clientId, screen_id: screenId, dt, hour }).toString();
+        let url;
+        if (granularity === "hourly") {
+          const hour = String(clampInt(hourEl.value.trim(), 0, 23)).padStart(2, "0");
+          url =
+            `${apiBase}/heatmap/hourly?` +
+            new URLSearchParams({ client_id: clientId, screen_id: screenId, dt, hour }).toString();
+        } else if (granularity === "daily") {
+          url =
+            `${apiBase}/heatmap/daily?` +
+            new URLSearchParams({ client_id: clientId, screen_id: screenId, dt }).toString();
+        } else {
+          url =
+            `${apiBase}/heatmap/weekly?` +
+            new URLSearchParams({ client_id: clientId, screen_id: screenId, week_start: dt }).toString();
+        }
 
         renderStatus(`GET ${url}\nloading...`);
 
@@ -155,7 +198,8 @@
         heatmap.setData({ max, data: points });
 
         renderStatus(
-          `bucket_start: ${data.bucket_start}\n` +
+          `granularity: ${granularity}\n` +
+            `bucket_start: ${data.bucket_start}\n` +
             `cells: ${cells.length}\n` +
             `max_count: ${max}\n`
         );
@@ -171,4 +215,3 @@
     </script>
   </body>
 </html>
-

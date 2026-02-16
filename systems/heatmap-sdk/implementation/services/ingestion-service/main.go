@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -30,20 +31,27 @@ type Event struct {
 }
 
 type KafkaEvent struct {
-	ClientID  string  `json:"client_id"`
-	ScreenID  string  `json:"screen_id"`
-	BatchID   string  `json:"batch_id,omitempty"`
-	EventTime string  `json:"event_time"`
-	XNorm     float64 `json:"x_norm"`
-	YNorm     float64 `json:"y_norm"`
-	EventType string  `json:"event_type"`
-	ReceivedAt string `json:"received_at,omitempty"`
+	ClientID   string  `json:"client_id"`
+	ScreenID   string  `json:"screen_id"`
+	BatchID    string  `json:"batch_id,omitempty"`
+	EventTime  string  `json:"event_time"`
+	XNorm      float64 `json:"x_norm"`
+	YNorm      float64 `json:"y_norm"`
+	EventType  string  `json:"event_type"`
+	ReceivedAt string  `json:"received_at,omitempty"`
 }
 
 func main() {
 	port := env("PORT", "8088")
 	kafkaBroker := env("KAFKA_BROKER", "kafka:9092")
 	topic := env("KAFKA_TOPIC", "heatmap.events.raw")
+	redisAddr := env("REDIS_ADDR", "redis:6379")
+	dedupTTLStr := env("DEDUP_TTL", "24h")
+
+	dedupTTL, err := time.ParseDuration(dedupTTLStr)
+	if err != nil {
+		log.Fatalf("invalid DEDUP_TTL %q: %v", dedupTTLStr, err)
+	}
 
 	writer := &kafka.Writer{
 		Addr:         kafka.TCP(kafkaBroker),
@@ -57,6 +65,10 @@ func main() {
 	defer func() {
 		_ = writer.Close()
 	}()
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr: redisAddr,
+	})
 
 	mux := http.NewServeMux()
 
@@ -78,6 +90,25 @@ func main() {
 		if err := validateBatch(req); err != nil {
 			httpError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+
+		// Batch-level idempotency via Redis SETNX
+		if req.BatchID != "" {
+			dedupKey := req.ClientID + ":" + req.BatchID
+			ok, err := rdb.SetNX(ctx, dedupKey, "1", dedupTTL).Result()
+			if err != nil {
+				// Fail-open: if Redis is unavailable, proceed without dedup
+				log.Printf("redis SETNX failed (proceeding): %v", err)
+			} else if !ok {
+				// Key already existed — duplicate batch
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"status":   "duplicate",
+					"batch_id": req.BatchID,
+				})
+				return
+			}
 		}
 
 		now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -126,7 +157,7 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Printf("ingestion-service listening on :%s (topic=%s broker=%s)", port, topic, kafkaBroker)
+	log.Printf("ingestion-service listening on :%s (topic=%s broker=%s redis=%s dedup_ttl=%s)", port, topic, kafkaBroker, redisAddr, dedupTTL)
 	log.Fatal(srv.ListenAndServe())
 }
 
@@ -187,4 +218,3 @@ func withCORS(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-
